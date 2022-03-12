@@ -1,11 +1,62 @@
+use std::sync::{Arc, Mutex};
 use std::{collections::HashSet, str::FromStr};
+use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let url = "https://github.com/";
-    let links = get_links_from_url(url).await?;
+    let url = "https://github.com";
+    let mut links_to_visit = get_links_from_url(url).await?;
 
-    println!("{:#?}", links);
+    // Consider using parking_lot::Mutex
+    let visited_links = Arc::new(Mutex::new(HashSet::new()));
+
+    loop {
+        let now = std::time::Instant::now();
+
+        // Multi-producer, single-consumer channel for sending and receiving new urls from parsed web pages
+        let (tx, mut rx) = mpsc::channel(links_to_visit.len());
+
+        let mut tasks = Vec::new();
+
+        loop {
+            let link = match links_to_visit.iter().next() {
+                Some(link) => link.clone(),
+                None => break,
+            };
+            links_to_visit.remove(&link);
+
+            let visited_links_arc_clone = Arc::clone(&visited_links);
+            let tx_clone = tx.clone();
+
+            tasks.push(tokio::spawn(async move {
+                match get_links_from_url(&link).await {
+                    Ok(parsed_links) => {
+                        tx_clone.send(parsed_links).await.unwrap();
+                        visited_links_arc_clone.lock().unwrap().insert(link.clone());
+                    }
+                    Err(e) => eprintln!("An error occured: {}", e),
+                };
+            }));
+        }
+
+        for task in tasks {
+            task.await?;
+        }
+
+        drop(tx);
+
+        while let Some(parsed_links) = rx.recv().await {
+            links_to_visit.extend(parsed_links);
+        }
+
+        links_to_visit = &links_to_visit - &visited_links.lock().unwrap();
+
+        println!("{}", now.elapsed().as_micros());
+
+        println!("{:#?}", links_to_visit.len());
+
+        break;
+    }
 
     Ok(())
 }
@@ -22,7 +73,10 @@ async fn get_links_from_url(url: &str) -> Result<HashSet<String>, reqwest::Error
     let links = Document::from(content.as_str())
         .find(Name("a"))
         .map(|el| {
-            let link = el.attr("href").unwrap();
+            let link = match el.attr("href") {
+                Some(link) => link,
+                None => "",
+            };
             normalize_link(url, link)
         })
         .flatten()
