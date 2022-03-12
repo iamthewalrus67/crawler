@@ -72,14 +72,13 @@ async fn get_links_from_url(url: &str) -> Result<HashSet<String>, reqwest::Error
 
     let links = Document::from(content.as_str())
         .find(Name("a"))
-        .map(|el| {
+        .filter_map(|el| {
             let link = match el.attr("href") {
                 Some(link) => link,
                 None => "",
             };
             normalize_link(url, link)
         })
-        .flatten()
         .collect::<HashSet<String>>();
 
     return Ok(links);
